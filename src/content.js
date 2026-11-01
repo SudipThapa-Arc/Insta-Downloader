@@ -129,9 +129,51 @@
     return width && height ? width / height : null;
   }
 
+  function imageStem(url) {
+    if (!url || typeof url !== "string") return null;
+    try {
+      const pathname = new URL(url).pathname;
+      const filename = pathname.split("/").pop() || "";
+      const stem = filename.replace(/\.[a-z0-9]+$/i, "");
+      return stem && stem.length >= 4 ? stem : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function posterStemFor(node) {
+    if (!node) return null;
+    if (node.tagName === "VIDEO") {
+      const poster = node.getAttribute("poster");
+      if (poster) {
+        const stem = imageStem(poster);
+        if (stem) return stem;
+      }
+      const img =
+        node.parentElement?.querySelector("img") ||
+        node.closest('[role="row"], [role="listitem"]')?.querySelector("img");
+      if (img) {
+        const stem = imageStem(img.currentSrc || img.src);
+        if (stem) return stem;
+      }
+    }
+    return imageStem(node.currentSrc || node.src);
+  }
+
   // --- media detection ------------------------------------------------------
   function isCandidate(node) {
     if (node.closest("header, nav, .ig-saver-btn")) return false;
+
+    // Skip IMG if it is just a poster for an adjacent or sibling VIDEO
+    if (node.tagName === "IMG") {
+      const container = node.parentElement;
+      if (
+        container &&
+        (container.querySelector("video") || container.parentElement?.querySelector("video"))
+      ) {
+        return false;
+      }
+    }
 
     const rect = node.getBoundingClientRect();
     if (rect.width < MIN_SIZE || rect.height < MIN_SIZE) return false;
@@ -227,18 +269,18 @@
     try {
       const story = storyContext();
       const shortcode = story ? null : shortcodeFor(media);
+      const posterStem = posterStemFor(media);
       let username = usernameFor(media);
 
-      let entry = null;
-      if (shortcode || story) {
-        entry = await askPage({
-          code: shortcode || null,
-          storyId: story ? story.storyId : null,
-          storyUser: story ? story.storyUser : null,
-          pk: story ? story.pk : null,
-          aspect: aspectOf(media)
-        });
-      }
+      // Query page interceptor (by shortcode, story, or poster image stem)
+      let entry = await askPage({
+        code: shortcode || null,
+        storyId: story ? story.storyId : null,
+        storyUser: story ? story.storyUser : null,
+        pk: story ? story.pk : null,
+        posterStem,
+        aspect: aspectOf(media)
+      });
       if (entry && entry.username) username = entry.username;
 
       // One item from the page data is always the full-quality source.
@@ -261,7 +303,7 @@
         shortcode ||
         (story
           ? `${story.storyUser || "story"}-${(items[0] && items[0].pk) || story.pk || Date.now()}`
-          : `ig-${Date.now()}`);
+          : (items[0] && items[0].pk ? `ig-${items[0].pk}` : (posterStem ? `dm-${posterStem}` : `ig-${Date.now()}`)));
 
       const result = await chrome.runtime.sendMessage({
         type: "ig-download",
@@ -295,6 +337,17 @@
   function attach(media) {
     const parent = media.parentElement;
     if (!parent) return;
+
+    // PREVENT DUPLICATE BUTTONS:
+    // If this container or host already has an Insta Saver button, don't duplicate
+    const existing =
+      parent.querySelector(":scope > .ig-saver-btn") ||
+      parent.parentElement?.querySelector(":scope > .ig-saver-btn") ||
+      media.closest(".ig-saver-host")?.querySelector(".ig-saver-btn");
+    if (existing) {
+      buttons.set(media, existing);
+      return;
+    }
 
     const button = document.createElement("button");
     button.type = "button";

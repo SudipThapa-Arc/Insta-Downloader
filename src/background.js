@@ -184,19 +184,7 @@ function variantsFor(item) {
   return source
     .filter((variant) => variant && typeof variant.url === "string" && variant.url)
     .filter((variant) => (seen.has(variant.url) ? false : seen.add(variant.url)))
-    .sort((a, b) => {
-      // Prioritize type 101 (progressive MP4 with multiplexed audio)
-      const a101 = a.type === 101 ? 1 : 0;
-      const b101 = b.type === 101 ? 1 : 0;
-      if (a101 !== b101) return b101 - a101;
-
-      // Prioritize progressive stream in URL
-      const aProg = typeof a.url === "string" && a.url.includes("progressive") ? 1 : 0;
-      const bProg = typeof b.url === "string" && b.url.includes("progressive") ? 1 : 0;
-      if (aProg !== bProg) return bProg - aProg;
-
-      return areaOf(b) - areaOf(a);
-    });
+    .sort((a, b) => areaOf(b) - areaOf(a)); // Highest resolution / quality first
 }
 
 async function resolveItem(item) {
@@ -207,23 +195,17 @@ async function resolveItem(item) {
   const variants = variantsFor(item);
   if (!variants.length) return { url: item.url, muted: false };
 
-  // Find any variant that is known to have audio (type 101 or progressive in URL)
+  // Find any variant that is known progressive
   const progWithAudio = variants.find(
-    (v) => (v.type === 101) || (typeof v.url === "string" && v.url.includes("progressive"))
+    (v) => v.type === 101 || (typeof v.url === "string" && v.url.includes("progressive"))
   );
 
   let unknown = false;
+  // Test variants starting from the highest resolution (1080p, etc.)
   for (const variant of variants.slice(0, MAX_PROBES)) {
-    if (variant.type === 101) {
-      return {
-        url: variant.url,
-        muted: false,
-        width: variant.width,
-        height: variant.height
-      };
-    }
     const audio = await probeAudio(variant.url);
     if (audio === true) {
+      // Highest resolution variant that has sound!
       return {
         url: variant.url,
         muted: false,
@@ -234,7 +216,7 @@ async function resolveItem(item) {
     if (audio === null) unknown = true;
   }
 
-  // If higher-resolution variants were probed and lack audio, use the known audio track
+  // If higher-resolution variants were probed and were video-only, fall back to known audio stream
   if (progWithAudio) {
     return {
       url: progWithAudio.url,
@@ -244,8 +226,7 @@ async function resolveItem(item) {
     };
   }
 
-  // Nothing reported an audio track: keep the highest resolution, and only
-  // claim it is silent when every probe actually confirmed that.
+  // Fallback to highest resolution variant
   const fallback = variants[0];
   return {
     url: fallback.url,

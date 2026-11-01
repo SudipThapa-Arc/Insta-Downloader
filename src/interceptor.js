@@ -20,9 +20,22 @@
   const byCode = new Map(); // shortcode -> { items, username, at }
   const byPk = new Map(); // "pk" -> { item, username, at }
   const byBurst = new Map(); // "user:x" | "id:x" -> { items, username, at }
+  const byImage = new Map(); // poster image stem -> { items, username, at }
 
   const num = (value) => (typeof value === "number" && isFinite(value) ? value : 0);
   const area = (entry) => num(entry.width) * num(entry.height);
+
+  function imageStem(url) {
+    if (!url || typeof url !== "string") return null;
+    try {
+      const pathname = new URL(url).pathname;
+      const filename = pathname.split("/").pop() || "";
+      const stem = filename.replace(/\.[a-z0-9]+$/i, "");
+      return stem && stem.length >= 4 ? stem : null;
+    } catch {
+      return null;
+    }
+  }
 
   function trim(map) {
     while (map.size > MAX_ENTRIES) map.delete(map.keys().next().value);
@@ -48,20 +61,7 @@
         type: num(entry.type)
       }))
       .filter((entry) => (seen.has(entry.url) ? false : seen.add(entry.url)))
-      .sort((a, b) => {
-        // Prioritize type 101 (progressive MP4 with multiplexed audio)
-        const a101 = a.type === 101 ? 1 : 0;
-        const b101 = b.type === 101 ? 1 : 0;
-        if (a101 !== b101) return b101 - a101;
-
-        // Prioritize progressive stream in URL
-        const aProg = typeof a.url === "string" && a.url.includes("progressive") ? 1 : 0;
-        const bProg = typeof b.url === "string" && b.url.includes("progressive") ? 1 : 0;
-        if (aProg !== bProg) return bProg - aProg;
-
-        // Otherwise largest area
-        return area(b) - area(a);
-      });
+      .sort((a, b) => area(b) - area(a)); // HIGHEST QUALITY / RESOLUTION FIRST
   }
 
   function imageCandidates(media) {
@@ -142,7 +142,10 @@
       node &&
       typeof node === "object" &&
       (node.image_versions2 || node.video_versions || node.video_url || node.display_url) &&
-      (typeof node.code === "string" || typeof node.shortcode === "string" || node.pk != null)
+      (typeof node.code === "string" ||
+        typeof node.shortcode === "string" ||
+        node.pk != null ||
+        node.id != null)
     );
   }
 
@@ -168,14 +171,32 @@
       (typeof node.shortcode === "string" && node.shortcode) ||
       null;
 
+    const items = itemsFor(node);
+    if (!items.length) return;
+    const stored = { items, username, at: Date.now() };
+
     if (code) {
-      const items = itemsFor(node);
-      if (items.length) remember(byCode, code, { items, username, at: Date.now() });
+      remember(byCode, code, stored);
     }
 
-    if (node.pk != null) {
-      const item = itemFor(node);
-      if (item) remember(byPk, String(node.pk), { item, username, at: Date.now() });
+    const id = node.id != null ? String(node.id) : node.pk != null ? String(node.pk) : null;
+    if (id) {
+      remember(byPk, id, stored);
+      const bare = id.split("_")[0];
+      if (bare !== id) remember(byPk, bare, stored);
+    }
+
+    // Index by image candidates (poster stems)
+    const candidates = node.image_versions2 && node.image_versions2.candidates;
+    if (Array.isArray(candidates)) {
+      for (const c of candidates) {
+        const stem = imageStem(c && c.url);
+        if (stem) remember(byImage, stem, stored);
+      }
+    }
+    if (typeof node.display_url === "string") {
+      const stem = imageStem(node.display_url);
+      if (stem) remember(byImage, stem, stored);
     }
   }
 
@@ -351,7 +372,12 @@
 
     if (message.pk) {
       const entry = byPk.get(String(message.pk));
-      if (entry) return { items: [entry.item], username: entry.username };
+      if (entry) return { items: Array.isArray(entry.items) ? entry.items : [entry.item], username: entry.username };
+    }
+
+    if (message.posterStem) {
+      const entry = byImage.get(message.posterStem);
+      if (entry) return { items: entry.items, username: entry.username };
     }
 
     const burst = burstFor(message);
@@ -369,24 +395,28 @@
   async function resolveWithFallback(message) {
     let entry = resolve(message);
     if (!entry && message.code) {
-      try {
-        const res = await nativeFetch(
-          `https://www.instagram.com/p/${encodeURIComponent(message.code)}/?__a=1&__d=dis`,
-          {
+      const urls = [
+        `https://www.instagram.com/p/${encodeURIComponent(message.code)}/?__a=1&__d=dis`,
+        `https://www.instagram.com/reel/${encodeURIComponent(message.code)}/?__a=1&__d=dis`
+      ];
+      for (const target of urls) {
+        try {
+          const res = await nativeFetch(target, {
             headers: {
               "X-IG-App-ID": "936619743392459",
               "X-Requested-With": "XMLHttpRequest"
             },
             credentials: "include"
+          });
+          if (res.ok) {
+            const json = await res.json();
+            ingest(json);
+            entry = resolve(message);
+            if (entry) break;
           }
-        );
-        if (res.ok) {
-          const json = await res.json();
-          ingest(json);
-          entry = resolve(message);
+        } catch {
+          /* try next */
         }
-      } catch {
-        /* ignore on-demand fetch errors */
       }
     }
     return entry;
