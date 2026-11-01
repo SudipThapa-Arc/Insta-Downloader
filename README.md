@@ -73,7 +73,7 @@ image or MP4 that the DOM does expose.
 
 - Only media you can already see while logged in is downloadable — nothing behind a paywall or
   private account you don't follow.
-- DMs and profile pictures are out of scope.
+- Private DMs (ephemeral voice messages, disappearing media) and profile pictures are out of scope; shared feed posts and reels inside DMs are supported.
 - Muxing a video-only stream together with its separate DASH audio track needs a video encoder;
   this extension instead selects the best variant that already contains audio.
 - Downloading someone else's content may break Instagram's Terms of Use; keep this for personal,

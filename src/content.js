@@ -6,8 +6,8 @@
   window.__instaSaverUi = true;
 
   const CDN = /(cdninstagram\.com|fbcdn\.net)/i;
-  const MIN_SIZE = 150; // px — filters out avatars, story bubbles, icons
-  const REPLY_TIMEOUT = 500;
+  const MIN_SIZE = 100; // px — supports feed, profile, reels and inbox DM previews
+  const REPLY_TIMEOUT = 3500; // ms — allows on-demand fetch for un-cached posts/reels
 
   const buttons = new WeakMap(); // media element -> button
   const liveButtons = new Set();
@@ -22,6 +22,21 @@
     error:
       '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 6.5l11 11"/><path d="M17.5 6.5l-11 11"/></svg>'
   };
+
+  const IG_RESERVED = new Set([
+    "direct",
+    "explore",
+    "reels",
+    "reel",
+    "stories",
+    "accounts",
+    "p",
+    "tv",
+    "about",
+    "developer",
+    "privacy",
+    "help"
+  ]);
 
   // --- page bridge ----------------------------------------------------------
   window.addEventListener("message", (event) => {
@@ -64,11 +79,22 @@
       if (code) return code;
     }
 
-    const scope = node.closest('article, [role="dialog"]');
+    const scope = node.closest('article, [role="dialog"], [role="row"], [role="listitem"]');
     if (scope) {
-      const link = scope.querySelector('a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]');
+      const link = scope.querySelector('a[href*="/p/"], a[href*="/reel/"], a[href*="/reels/"], a[href*="/tv/"]');
       const code = codeFrom(link && link.getAttribute("href"));
       if (code) return code;
+    }
+
+    // Direct Messages fallback: search nearby ancestors for any reel/post link
+    let current = node.parentElement;
+    for (let depth = 0; depth < 8 && current; depth += 1) {
+      const link = current.querySelector('a[href*="/reel/"], a[href*="/p/"], a[href*="/reels/"], a[href*="/tv/"]');
+      if (link) {
+        const code = codeFrom(link.getAttribute("href"));
+        if (code) return code;
+      }
+      current = current.parentElement;
     }
 
     return codeFrom(location.pathname);
@@ -85,16 +111,16 @@
   }
 
   function usernameFor(node) {
-    const scope = node.closest('article, [role="dialog"]');
+    const scope = node.closest('article, [role="dialog"], [role="row"], [role="listitem"]');
     if (scope) {
       const links = scope.querySelectorAll('a[href^="/"]');
       for (const link of links) {
         const match = (link.getAttribute("href") || "").match(/^\/([A-Za-z0-9._]{2,30})\/$/);
-        if (match) return match[1];
+        if (match && !IG_RESERVED.has(match[1])) return match[1];
       }
     }
     const profile = location.pathname.match(/^\/([A-Za-z0-9._]{2,30})\/?$/);
-    return profile ? profile[1] : null;
+    return profile && !IG_RESERVED.has(profile[1]) ? profile[1] : null;
   }
 
   function aspectOf(media) {

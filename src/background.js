@@ -105,7 +105,7 @@ async function readRange(url, range, limit) {
   try {
     const response = await fetch(url, {
       headers: range ? { Range: range } : {},
-      credentials: "include",
+      credentials: "omit",
       signal: controller.signal
     });
     if (!response.ok || !response.body) return null;
@@ -152,15 +152,18 @@ async function probeAudio(url) {
       (await readRange(url, `bytes=0-${HEAD_BYTES - 1}`, HEAD_BYTES)) ||
       (await readRange(url, null, HEAD_BYTES));
     if (head && head.length > 8) {
-      const moov = readBoxes(head).find((box) => box.type === "moov");
-      if (moov && moov.start + moov.size <= head.length) {
-        result = hasAudio(head.subarray(moov.start + moov.header, moov.start + moov.size));
+      if (hasAudio(head)) {
+        result = true;
       } else {
-        // Slow path: moov is at the end of the file.
-        const tail = await readRange(url, `bytes=-${TAIL_BYTES}`, TAIL_BYTES);
-        if (tail && tail.length > 8) {
-          const tailMoov = readBoxes(tail).some((box) => box.type === "moov");
-          result = hasAudio(tail) ? true : tailMoov ? false : null;
+        const moov = readBoxes(head).find((box) => box.type === "moov");
+        if (moov && moov.start + moov.size <= head.length) {
+          result = false;
+        } else {
+          // Slow path: moov is at the end of the file.
+          const tail = await readRange(url, `bytes=-${TAIL_BYTES}`, TAIL_BYTES);
+          if (tail && tail.length > 8) {
+            result = hasAudio(tail) ? true : null;
+          }
         }
       }
     }
@@ -181,7 +184,19 @@ function variantsFor(item) {
   return source
     .filter((variant) => variant && typeof variant.url === "string" && variant.url)
     .filter((variant) => (seen.has(variant.url) ? false : seen.add(variant.url)))
-    .sort((a, b) => areaOf(b) - areaOf(a));
+    .sort((a, b) => {
+      // Prioritize type 101 (progressive MP4 with multiplexed audio)
+      const a101 = a.type === 101 ? 1 : 0;
+      const b101 = b.type === 101 ? 1 : 0;
+      if (a101 !== b101) return b101 - a101;
+
+      // Prioritize progressive stream in URL
+      const aProg = typeof a.url === "string" && a.url.includes("progressive") ? 1 : 0;
+      const bProg = typeof b.url === "string" && b.url.includes("progressive") ? 1 : 0;
+      if (aProg !== bProg) return bProg - aProg;
+
+      return areaOf(b) - areaOf(a);
+    });
 }
 
 async function resolveItem(item) {
@@ -192,8 +207,21 @@ async function resolveItem(item) {
   const variants = variantsFor(item);
   if (!variants.length) return { url: item.url, muted: false };
 
+  // Find any variant that is known to have audio (type 101 or progressive in URL)
+  const progWithAudio = variants.find(
+    (v) => (v.type === 101) || (typeof v.url === "string" && v.url.includes("progressive"))
+  );
+
   let unknown = false;
   for (const variant of variants.slice(0, MAX_PROBES)) {
+    if (variant.type === 101) {
+      return {
+        url: variant.url,
+        muted: false,
+        width: variant.width,
+        height: variant.height
+      };
+    }
     const audio = await probeAudio(variant.url);
     if (audio === true) {
       return {
@@ -204,6 +232,16 @@ async function resolveItem(item) {
       };
     }
     if (audio === null) unknown = true;
+  }
+
+  // If higher-resolution variants were probed and lack audio, use the known audio track
+  if (progWithAudio) {
+    return {
+      url: progWithAudio.url,
+      muted: false,
+      width: progWithAudio.width,
+      height: progWithAudio.height
+    };
   }
 
   // Nothing reported an audio track: keep the highest resolution, and only

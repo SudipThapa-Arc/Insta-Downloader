@@ -48,7 +48,20 @@
         type: num(entry.type)
       }))
       .filter((entry) => (seen.has(entry.url) ? false : seen.add(entry.url)))
-      .sort((a, b) => area(b) - area(a));
+      .sort((a, b) => {
+        // Prioritize type 101 (progressive MP4 with multiplexed audio)
+        const a101 = a.type === 101 ? 1 : 0;
+        const b101 = b.type === 101 ? 1 : 0;
+        if (a101 !== b101) return b101 - a101;
+
+        // Prioritize progressive stream in URL
+        const aProg = typeof a.url === "string" && a.url.includes("progressive") ? 1 : 0;
+        const bProg = typeof b.url === "string" && b.url.includes("progressive") ? 1 : 0;
+        if (aProg !== bProg) return bProg - aProg;
+
+        // Otherwise largest area
+        return area(b) - area(a);
+      });
   }
 
   function imageCandidates(media) {
@@ -74,6 +87,24 @@
         height: best.height,
         pk: media.pk != null ? String(media.pk) : null,
         variants
+      };
+    }
+
+    if (typeof media.video_url === "string" && media.video_url) {
+      return {
+        type: "video",
+        url: media.video_url,
+        width: num(media.dimensions?.width),
+        height: num(media.dimensions?.height),
+        pk: media.pk != null ? String(media.pk) : null,
+        variants: [
+          {
+            url: media.video_url,
+            width: num(media.dimensions?.width),
+            height: num(media.dimensions?.height),
+            type: 101
+          }
+        ]
       };
     }
 
@@ -110,8 +141,8 @@
     return !!(
       node &&
       typeof node === "object" &&
-      (node.image_versions2 || node.video_versions) &&
-      (typeof node.code === "string" || node.pk != null)
+      (node.image_versions2 || node.video_versions || node.video_url || node.display_url) &&
+      (typeof node.code === "string" || typeof node.shortcode === "string" || node.pk != null)
     );
   }
 
@@ -127,11 +158,19 @@
   }
 
   function rememberMedia(node) {
-    const username = node.user && typeof node.user.username === "string" ? node.user.username : null;
+    const username =
+      (node.user && typeof node.user.username === "string" && node.user.username) ||
+      (node.owner && typeof node.owner.username === "string" && node.owner.username) ||
+      null;
 
-    if (typeof node.code === "string" && node.code) {
+    const code =
+      (typeof node.code === "string" && node.code) ||
+      (typeof node.shortcode === "string" && node.shortcode) ||
+      null;
+
+    if (code) {
       const items = itemsFor(node);
-      if (items.length) remember(byCode, node.code, { items, username, at: Date.now() });
+      if (items.length) remember(byCode, code, { items, username, at: Date.now() });
     }
 
     if (node.pk != null) {
@@ -190,7 +229,13 @@
 
   function ingestText(text) {
     if (typeof text !== "string" || text.length < 24) return;
-    if (text.indexOf("image_versions2") === -1 && text.indexOf("video_versions") === -1) return;
+    if (
+      text.indexOf("image_versions2") === -1 &&
+      text.indexOf("video_versions") === -1 &&
+      text.indexOf("video_url") === -1 &&
+      text.indexOf("display_url") === -1
+    )
+      return;
     try {
       ingest(JSON.parse(text));
     } catch {
@@ -321,15 +366,41 @@
     return null;
   }
 
+  async function resolveWithFallback(message) {
+    let entry = resolve(message);
+    if (!entry && message.code) {
+      try {
+        const res = await nativeFetch(
+          `https://www.instagram.com/p/${encodeURIComponent(message.code)}/?__a=1&__d=dis`,
+          {
+            headers: {
+              "X-IG-App-ID": "936619743392459",
+              "X-Requested-With": "XMLHttpRequest"
+            },
+            credentials: "include"
+          }
+        );
+        if (res.ok) {
+          const json = await res.json();
+          ingest(json);
+          entry = resolve(message);
+        }
+      } catch {
+        /* ignore on-demand fetch errors */
+      }
+    }
+    return entry;
+  }
+
   // --- isolated content script bridge --------------------------------------
-  window.addEventListener("message", (event) => {
+  window.addEventListener("message", async (event) => {
     if (event.source !== window) return;
     const data = event.data;
     if (!data || data.__instaSaver !== "get") return;
 
     let entry = null;
     try {
-      entry = resolve(data);
+      entry = await resolveWithFallback(data);
     } catch {
       entry = null;
     }
