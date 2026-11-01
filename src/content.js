@@ -380,93 +380,218 @@
     liveButtons.add(button);
   }
 
-  // --- action bar injection (on the side next to comments / likes / save) ---
-  function attachToActionBar(anchorSvg) {
-    if (!anchorSvg) return;
-    const btn = anchorSvg.closest("button, [role='button']");
-    if (!btn || btn.closest(".ig-saver-action-btn")) return;
+  // --- action bar injection (feed posts & reels) -----------------------------
+  function findMediaForPost(post) {
+    const video = post.querySelector("video");
+    if (video) return video;
 
-    const container = btn.parentElement;
-    if (!container) return;
-
-    const bar =
-      btn.closest("section, div[style*='flex'], div[class*='action'], div[role='presentation']") ||
-      container.parentElement ||
-      container;
-    if (bar.querySelector(".ig-saver-action-btn") || container.querySelector(".ig-saver-action-btn")) {
-      return;
+    const imgs = Array.from(
+      post.querySelectorAll('img[srcset], img[src*="cdninstagram"], img[src*="fbcdn"]')
+    );
+    let best = null;
+    let maxArea = 0;
+    for (const img of imgs) {
+      if (img.closest("header, nav, .ig-saver-btn")) continue;
+      const rect = img.getBoundingClientRect();
+      const area = rect.width * rect.height;
+      if (area > maxArea && rect.width >= MIN_SIZE && rect.height >= MIN_SIZE) {
+        maxArea = area;
+        best = img;
+      }
     }
+    return best || post.querySelector("img") || null;
+  }
 
-    const scope =
-      btn.closest("article, [role='dialog'], [role='presentation'], [tabindex='-1']") ||
-      btn.closest("div[style*='height']") ||
+  function findMediaForReel(column) {
+    const container =
+      column.closest('[role="dialog"], [tabindex="-1"], section, div[style*="height"]') ||
       document;
+    const video = container.querySelector("video");
+    if (video) return video;
 
-    const findMedia = () => {
-      const v = scope.querySelector("video");
-      if (v) return v;
-      const img = scope.querySelector('img[srcset], img[src*="cdninstagram"], img[src*="fbcdn"]');
-      if (img) return img;
-      return document.querySelector("video") || document.querySelector("img[src*='cdninstagram']");
-    };
+    const videos = Array.from(document.querySelectorAll("video"));
+    for (const v of videos) {
+      const rect = v.getBoundingClientRect();
+      if (rect.width > 200 && rect.height > 200 && rect.top < window.innerHeight && rect.bottom > 0) {
+        return v;
+      }
+    }
+    return videos[0] || null;
+  }
 
-    const isReels =
-      location.pathname.includes("/reel") ||
-      !!btn.closest("[style*='column'], div[class*='action']");
-
-    const wrapper = document.createElement("div");
-    wrapper.className = isReels ? "ig-saver-action-wrap" : "ig-saver-action-container";
-
+  function createActionButton(variant, onClick) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "ig-saver-action-btn";
     button.dataset.state = "idle";
+    button.dataset.variant = variant;
     button.title = "Download";
     button.setAttribute("aria-label", "Download");
     button.innerHTML = ICONS.download;
-
-    if (isReels) {
-      const label = document.createElement("span");
-      label.className = "ig-saver-action-label";
-      label.textContent = "Save";
-      wrapper.appendChild(button);
-      wrapper.appendChild(label);
-    } else {
-      wrapper.appendChild(button);
-    }
 
     const stop = (event) => event.stopPropagation();
     for (const type of ["pointerdown", "mousedown", "touchstart", "dblclick", "auxclick"]) {
       button.addEventListener(type, stop);
     }
-
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const media = findMedia();
+      onClick(button);
+    });
+
+    liveButtons.add(button);
+    return button;
+  }
+
+  function findReelsActionColumn(el) {
+    let curr = el ? (el.nodeType === 1 ? el : el.parentElement) : null;
+    while (curr && curr !== document.body && curr !== document.documentElement) {
+      const rect = curr.getBoundingClientRect();
+      // Reels action columns are narrow (typically 40px to 100px) and tall (>= 120px)
+      // and contain multiple action icons
+      if (rect.width > 20 && rect.width <= 140 && rect.height >= 120) {
+        const svgs = curr.querySelectorAll("svg");
+        if (svgs.length >= 2) {
+          return curr;
+        }
+      }
+      curr = curr.parentElement;
+    }
+    return null;
+  }
+
+  // Feed posts and post modal dialogs: inject on the right side next to Bookmark
+  function attachFeedAction(post) {
+    if (!post || location.pathname.includes("/reel") || post.querySelector(".ig-saver-action-btn")) return;
+
+    // Look for the bookmark button (Save / Remove ribbon icon)
+    const bookmarkSvg = post.querySelector(
+      'svg[aria-label="Save"], svg[aria-label="Remove"], svg[aria-label="Bookmark"]'
+    );
+    if (bookmarkSvg && findReelsActionColumn(bookmarkSvg)) {
+      // This bookmark is inside a vertical Reels column, not a horizontal feed post
+      return;
+    }
+
+    const bookmarkBtn = bookmarkSvg ? bookmarkSvg.closest("button, [role='button']") : null;
+
+    const button = createActionButton("feed", (btn) => {
+      const media = findMediaForPost(post);
       if (media) {
-        onDownload(media, button);
+        onDownload(media, btn);
       } else {
         toast("No media found — open the post and try again");
       }
     });
 
-    if (container.parentElement === bar) {
-      container.insertAdjacentElement("afterend", wrapper);
-    } else {
-      btn.insertAdjacentElement("afterend", wrapper);
+    if (bookmarkBtn) {
+      const section = post.querySelector("section");
+      const rightGroup = section ? section.querySelector(":scope > div:last-child") : null;
+
+      if (rightGroup && rightGroup.contains(bookmarkSvg)) {
+        // Ensure right group maintains flex row alignment
+        const comp = window.getComputedStyle(rightGroup);
+        if (comp.display !== "flex" && comp.display !== "inline-flex") {
+          rightGroup.style.display = "inline-flex";
+          rightGroup.style.alignItems = "center";
+        }
+        const bookmarkItem =
+          Array.from(rightGroup.children).find((c) => c.contains(bookmarkSvg)) || bookmarkBtn;
+        bookmarkItem.insertAdjacentElement("beforebegin", button);
+        return;
+      }
+
+      const parent = bookmarkBtn.parentElement;
+      if (parent) {
+        const comp = window.getComputedStyle(parent);
+        if (comp.display !== "flex" && comp.display !== "inline-flex") {
+          parent.style.display = "inline-flex";
+          parent.style.alignItems = "center";
+        }
+        bookmarkBtn.insertAdjacentElement("beforebegin", button);
+        return;
+      }
     }
 
-    liveButtons.add(button);
+    // Fallback: If no bookmark button found, attach to the right side of the action section
+    const section = post.querySelector("section");
+    if (section) {
+      button.style.marginLeft = "auto";
+      section.appendChild(button);
+    }
+  }
+
+  // Reels: inject into the vertical action column on the right
+  function attachReelAction(column) {
+    if (!column || column.querySelector(".ig-saver-action-wrap, .ig-saver-action-btn")) return;
+
+    const shareSvg = column.querySelector('svg[aria-label="Share Post"], svg[aria-label="Share"]');
+    const bookmarkSvg = column.querySelector('svg[aria-label="Save"], svg[aria-label="Remove"], svg[aria-label="Bookmark"]');
+    const commentSvg = column.querySelector('svg[aria-label="Comment"]');
+
+    const anchorSvg = shareSvg || bookmarkSvg || commentSvg;
+    if (!anchorSvg) return;
+
+    const anchorBtn = anchorSvg.closest("button, [role='button']") || anchorSvg;
+    const directChild =
+      Array.from(column.children).find((c) => c.contains(anchorBtn)) || anchorBtn;
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "ig-saver-action-wrap";
+
+    const button = createActionButton("reel", (btn) => {
+      const media = findMediaForReel(column);
+      if (media) {
+        onDownload(media, btn);
+      } else {
+        toast("No media found — open the post and try again");
+      }
+    });
+
+    const label = document.createElement("span");
+    label.className = "ig-saver-action-label";
+    label.textContent = "Download";
+
+    wrapper.appendChild(button);
+    wrapper.appendChild(label);
+
+    // If anchoring to Share, place right below Share (between Share and Bookmark).
+    // If anchoring to Bookmark, place right above Bookmark.
+    if (shareSvg && directChild.contains(shareSvg)) {
+      directChild.insertAdjacentElement("afterend", wrapper);
+    } else if (bookmarkSvg && directChild.contains(bookmarkSvg)) {
+      directChild.insertAdjacentElement("beforebegin", wrapper);
+    } else {
+      directChild.insertAdjacentElement("afterend", wrapper);
+    }
+  }
+
+  function scanFeedActionBars() {
+    if (location.pathname.includes("/reel")) return;
+    const posts = document.querySelectorAll("article, [role='dialog']");
+    for (const post of posts) {
+      attachFeedAction(post);
+    }
+  }
+
+  function scanReelActionBars() {
+    const actionSvgs = document.querySelectorAll(
+      'svg[aria-label="Save"], svg[aria-label="Remove"], svg[aria-label="Bookmark"], svg[aria-label="Share Post"], svg[aria-label="Share"], svg[aria-label="Comment"]'
+    );
+    const processedColumns = new Set();
+
+    for (const svg of actionSvgs) {
+      const column = findReelsActionColumn(svg);
+      if (!column || processedColumns.has(column)) continue;
+      processedColumns.add(column);
+
+      attachReelAction(column);
+    }
   }
 
   function scanActionBars() {
-    const anchors = document.querySelectorAll(
-      'svg[aria-label="Comment"], svg[aria-label="Save"], svg[aria-label="Share Post"], svg[aria-label="Share"]'
-    );
-    for (const anchor of anchors) {
-      attachToActionBar(anchor);
-    }
+    scanFeedActionBars();
+    scanReelActionBars();
   }
 
   function scan() {

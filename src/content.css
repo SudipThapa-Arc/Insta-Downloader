@@ -51,20 +51,7 @@
   height: 36px !important;
 }
 
-/* --- Action bar button (on the side next to comments / likes / save) --- */
-.ig-saver-action-container,
-.ig-saver-action-wrap {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  vertical-align: middle;
-}
-
-.ig-saver-action-wrap {
-  flex-direction: column;
-  margin: 6px 0;
-}
-
+/* --- Action bar button in feed posts (right side, next to bookmark) --- */
 .ig-saver-action-btn {
   all: unset;
   display: inline-flex;
@@ -74,14 +61,20 @@
   padding: 8px;
   box-sizing: border-box;
   color: inherit;
-  transition: transform 120ms ease, opacity 120ms ease, color 120ms ease;
+  vertical-align: middle;
+  transition: transform 120ms ease, opacity 120ms ease;
   user-select: none;
   -webkit-user-select: none;
 }
 
+article .ig-saver-action-btn,
+[role="dialog"] .ig-saver-action-btn {
+  margin-right: 6px;
+}
+
 .ig-saver-action-btn:hover {
-  opacity: 0.72;
-  transform: scale(1.1);
+  opacity: 0.7;
+  transform: scale(1.08);
 }
 
 .ig-saver-action-btn:active {
@@ -107,6 +100,15 @@
 
 .ig-saver-action-btn[data-state="error"] {
   color: #ed4956 !important;
+}
+
+/* Reels vertical action bar (right side column) */
+.ig-saver-action-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin: 6px 0;
 }
 
 .ig-saver-action-label {
