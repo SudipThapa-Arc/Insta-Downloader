@@ -37,6 +37,11 @@
   }
 }
 
+/* Reel player and story viewer: clear their own top-right controls. */
+.ig-saver-btn[data-placement="inset"] {
+  top: 68px;
+}
+
 .ig-saver-btn:active {
   transform: scale(0.96);
 }

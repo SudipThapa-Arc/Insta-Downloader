@@ -1,12 +1,13 @@
-// Content script (isolated world). Finds post media, injects a download
-// button, resolves the best URL for it, and asks the worker to download.
+// Content script (isolated world). Finds post and story media, injects a
+// download button, asks the page for the real media URLs, and hands the chosen
+// file to the worker.
 (() => {
   if (window.__instaSaverUi) return;
   window.__instaSaverUi = true;
 
   const CDN = /(cdninstagram\.com|fbcdn\.net)/i;
   const MIN_SIZE = 150; // px — filters out avatars, story bubbles, icons
-  const REPLY_TIMEOUT = 400;
+  const REPLY_TIMEOUT = 500;
 
   const buttons = new WeakMap(); // media element -> button
   const liveButtons = new Set();
@@ -32,9 +33,8 @@
     resolve(data.entry || null);
   });
 
-  function askPage(shortcode) {
+  function askPage(query) {
     return new Promise((resolve) => {
-      if (!shortcode) return resolve(null);
       const id = (requestId += 1);
       const timer = setTimeout(() => {
         if (pending.has(id)) {
@@ -46,8 +46,61 @@
         clearTimeout(timer);
         resolve(entry);
       });
-      window.postMessage({ __instaSaver: "get", id, shortcode }, "*");
+      window.postMessage({ __instaSaver: "get", id, ...query }, "*");
     });
+  }
+
+  // --- context --------------------------------------------------------------
+  function codeFrom(href) {
+    if (!href) return null;
+    const match = String(href).match(/\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]{5,})/);
+    return match ? match[1] : null;
+  }
+
+  function shortcodeFor(node) {
+    const linked = node.closest("a[href]");
+    if (linked) {
+      const code = codeFrom(linked.getAttribute("href"));
+      if (code) return code;
+    }
+
+    const scope = node.closest('article, [role="dialog"]');
+    if (scope) {
+      const link = scope.querySelector('a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]');
+      const code = codeFrom(link && link.getAttribute("href"));
+      if (code) return code;
+    }
+
+    return codeFrom(location.pathname);
+  }
+
+  // /stories/<user>/<pk>/ and /stories/highlights/<id>/
+  function storyContext() {
+    const parts = location.pathname.split("/").filter(Boolean);
+    if (parts[0] !== "stories" || !parts[1]) return null;
+    if (parts[1] === "highlights") {
+      return { storyId: parts[2] || null, storyUser: null, pk: null };
+    }
+    return { storyId: null, storyUser: parts[1], pk: parts[2] || null };
+  }
+
+  function usernameFor(node) {
+    const scope = node.closest('article, [role="dialog"]');
+    if (scope) {
+      const links = scope.querySelectorAll('a[href^="/"]');
+      for (const link of links) {
+        const match = (link.getAttribute("href") || "").match(/^\/([A-Za-z0-9._]{2,30})\/$/);
+        if (match) return match[1];
+      }
+    }
+    const profile = location.pathname.match(/^\/([A-Za-z0-9._]{2,30})\/?$/);
+    return profile ? profile[1] : null;
+  }
+
+  function aspectOf(media) {
+    const width = media.videoWidth || media.naturalWidth || media.getBoundingClientRect().width;
+    const height = media.videoHeight || media.naturalHeight || media.getBoundingClientRect().height;
+    return width && height ? width / height : null;
   }
 
   // --- media detection ------------------------------------------------------
@@ -86,42 +139,6 @@
     return best || null;
   }
 
-  function codeFrom(href) {
-    if (!href) return null;
-    const match = String(href).match(/\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]{5,})/);
-    return match ? match[1] : null;
-  }
-
-  function shortcodeFor(node) {
-    const linked = node.closest("a[href]");
-    if (linked) {
-      const code = codeFrom(linked.getAttribute("href"));
-      if (code) return code;
-    }
-
-    const scope = node.closest('article, [role="dialog"]');
-    if (scope) {
-      const link = scope.querySelector('a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]');
-      const code = codeFrom(link && link.getAttribute("href"));
-      if (code) return code;
-    }
-
-    return codeFrom(location.pathname);
-  }
-
-  function usernameFor(node) {
-    const scope = node.closest('article, [role="dialog"]');
-    if (scope) {
-      const links = scope.querySelectorAll('a[href^="/"]');
-      for (const link of links) {
-        const match = (link.getAttribute("href") || "").match(/^\/([A-Za-z0-9._]{2,30})\/$/);
-        if (match) return match[1];
-      }
-    }
-    const profile = location.pathname.match(/^\/([A-Za-z0-9._]{2,30})\/?$/);
-    return profile ? profile[1] : null;
-  }
-
   function domItems(node) {
     if (node.tagName === "VIDEO") {
       const src = node.currentSrc || node.src || "";
@@ -152,7 +169,7 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       if (toastEl) toastEl.removeAttribute("data-show");
-    }, 1900);
+    }, 2100);
   }
 
   // --- download -------------------------------------------------------------
@@ -169,20 +186,41 @@
     button.title = label;
   }
 
+  function describe(result, count) {
+    if (count > 1) return `Saved ${count} files`;
+    const parts = ["Saved"];
+    if (result && result.size) parts.push(result.size);
+    if (result && result.muted) parts.push("no audio track available");
+    return parts.join(" · ");
+  }
+
   async function onDownload(media, button) {
     if (button.dataset.state === "busy") return;
     setState(button, "busy");
 
     try {
-      const shortcode = shortcodeFor(media);
+      const story = storyContext();
+      const shortcode = story ? null : shortcodeFor(media);
       let username = usernameFor(media);
 
-      const entry = shortcode ? await askPage(shortcode) : null;
+      let entry = null;
+      if (shortcode || story) {
+        entry = await askPage({
+          code: shortcode || null,
+          storyId: story ? story.storyId : null,
+          storyUser: story ? story.storyUser : null,
+          pk: story ? story.pk : null,
+          aspect: aspectOf(media)
+        });
+      }
       if (entry && entry.username) username = entry.username;
 
-      // A single-media post: the page data is always the full-quality source.
-      // A carousel: use the DOM for the slide that was clicked.
-      let items = entry && entry.items && entry.items.length === 1 ? entry.items : null;
+      // One item from the page data is always the full-quality source.
+      // A carousel: keep the slide that was actually clicked, from the DOM.
+      let items = null;
+      if (entry && entry.items && entry.items.length) {
+        items = story || entry.items.length === 1 ? entry.items : null;
+      }
       if (!items) items = domItems(media);
       if (!items && entry && entry.items) items = entry.items;
 
@@ -193,16 +231,22 @@
         return;
       }
 
+      const base =
+        shortcode ||
+        (story
+          ? `${story.storyUser || "story"}-${(items[0] && items[0].pk) || story.pk || Date.now()}`
+          : `ig-${Date.now()}`);
+
       const result = await chrome.runtime.sendMessage({
         type: "ig-download",
         items,
-        base: shortcode || `ig-${Date.now()}`,
-        username
+        base,
+        username: username || (story && story.storyUser) || null
       });
 
       if (result && result.ok) {
         setState(button, "done");
-        toast(items.length > 1 ? `Saved ${items.length} files` : "Saved to your downloads");
+        toast(describe(result, items.length));
       } else {
         setState(button, "error");
         toast("Download failed — try again");
@@ -233,6 +277,12 @@
     button.title = "Download";
     button.setAttribute("aria-label", "Download");
     button.innerHTML = ICONS.download;
+
+    // Full-bleed media (reel player, story viewer) has its own header controls
+    // in the top-right corner, so the button sits just below them.
+    if (media.getBoundingClientRect().height >= window.innerHeight * 0.8) {
+      button.dataset.placement = "inset";
+    }
 
     const stop = (event) => event.stopPropagation();
     for (const type of ["pointerdown", "mousedown", "touchstart", "dblclick", "auxclick"]) {

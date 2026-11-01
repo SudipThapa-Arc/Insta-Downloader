@@ -1,71 +1,177 @@
 // Runs in the page's own JS context (world: MAIN) at document_start.
-// Instagram streams reels/feed videos through <video src="blob:...">, so the
-// real MP4 URL never touches the DOM. The media URLs *are* present in the JSON
-// Instagram fetches, so we watch fetch/XHR and keep a shortcode -> media map
-// that the isolated content script can ask for over postMessage.
+// Instagram streams reels/stories through <video src="blob:...">, so the real
+// media URL never touches the DOM. The URLs *are* present in the JSON Instagram
+// fetches, so we watch fetch/XHR and keep indexes the isolated content script
+// can query over postMessage:
+//
+//   byCode   shortcode  -> post media (feed, profile, reel page, post modal)
+//   byPk     media pk   -> one story/highlight item (/stories/<user>/<pk>/)
+//   byBurst  username / highlight id -> every item of one story burst
+//
+// Every video keeps ALL its encoded variants, largest first: Instagram serves
+// some of them video-only (the audio track lives separately in the DASH
+// manifest), so the worker probes them and picks the best one that has sound.
 
 (() => {
   if (window.__instaSaverCapture) return;
   window.__instaSaverCapture = true;
 
-  const MAX_ENTRIES = 400;
-  const store = new Map(); // shortcode -> { items, username, at }
+  const MAX_ENTRIES = 600;
+  const byCode = new Map(); // shortcode -> { items, username, at }
+  const byPk = new Map(); // "pk" -> { item, username, at }
+  const byBurst = new Map(); // "user:x" | "id:x" -> { items, username, at }
 
-  const widest = (list) =>
-    Array.isArray(list) && list.length
-      ? list.reduce((best, item) => ((item?.width || 0) >= (best?.width || 0) ? item : best))
-      : null;
+  const num = (value) => (typeof value === "number" && isFinite(value) ? value : 0);
+  const area = (entry) => num(entry.width) * num(entry.height);
 
-  function imageUrl(media) {
-    return widest(media?.image_versions2?.candidates)?.url || null;
+  function trim(map) {
+    while (map.size > MAX_ENTRIES) map.delete(map.keys().next().value);
   }
 
-  function videoUrl(media) {
-    return widest(media?.video_versions)?.url || null;
+  function remember(map, key, value) {
+    if (!key) return;
+    if (map.has(key)) map.delete(key); // keep insertion order = recency
+    map.set(key, value);
+    trim(map);
+  }
+
+  function videoVariants(media) {
+    const list = media && media.video_versions;
+    if (!Array.isArray(list)) return [];
+    const seen = new Set();
+    return list
+      .filter((entry) => entry && typeof entry.url === "string" && entry.url)
+      .map((entry) => ({
+        url: entry.url,
+        width: num(entry.width),
+        height: num(entry.height),
+        type: num(entry.type)
+      }))
+      .filter((entry) => (seen.has(entry.url) ? false : seen.add(entry.url)))
+      .sort((a, b) => area(b) - area(a));
+  }
+
+  function imageCandidates(media) {
+    const list = media && media.image_versions2 && media.image_versions2.candidates;
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((entry) => entry && typeof entry.url === "string" && entry.url)
+      .map((entry) => ({ url: entry.url, width: num(entry.width), height: num(entry.height) }))
+      .sort((a, b) => area(b) - area(a));
+  }
+
+  // One downloadable item: the best URL plus every video variant to choose from.
+  function itemFor(media) {
+    if (!media || typeof media !== "object") return null;
+
+    const variants = videoVariants(media);
+    if (variants.length) {
+      const best = variants[0];
+      return {
+        type: "video",
+        url: best.url,
+        width: best.width,
+        height: best.height,
+        pk: media.pk != null ? String(media.pk) : null,
+        variants
+      };
+    }
+
+    const images = imageCandidates(media);
+    const best =
+      images[0] ||
+      (typeof media.display_url === "string" && media.display_url
+        ? { url: media.display_url, width: 0, height: 0 }
+        : null);
+    if (!best) return null;
+    return {
+      type: "image",
+      url: best.url,
+      width: num(best.width),
+      height: num(best.height),
+      pk: media.pk != null ? String(media.pk) : null
+    };
   }
 
   function itemsFor(media) {
     const slides =
-      Array.isArray(media.carousel_media) && media.carousel_media.length ? media.carousel_media : [media];
+      Array.isArray(media.carousel_media) && media.carousel_media.length
+        ? media.carousel_media
+        : [media];
     const items = [];
-
     for (const slide of slides) {
-      if (!slide || typeof slide !== "object") continue;
-      const video = videoUrl(slide);
-      if (video) {
-        items.push({ type: "video", url: video });
-        continue;
-      }
-      const image = imageUrl(slide);
-      if (image) items.push({ type: "image", url: image });
+      const item = itemFor(slide);
+      if (item) items.push(item);
     }
-
     return items;
   }
 
-  function remember(code, media, username) {
-    const items = itemsFor(media);
+  function isMediaNode(node) {
+    return !!(
+      node &&
+      typeof node === "object" &&
+      (node.image_versions2 || node.video_versions) &&
+      (typeof node.code === "string" || node.pk != null)
+    );
+  }
+
+  // A story/highlight burst: { id: "highlight:123", user, items: [media…] }
+  function isBurst(node) {
+    return !!(
+      node &&
+      typeof node === "object" &&
+      Array.isArray(node.items) &&
+      node.items.length &&
+      node.items.some(isMediaNode)
+    );
+  }
+
+  function rememberMedia(node) {
+    const username = node.user && typeof node.user.username === "string" ? node.user.username : null;
+
+    if (typeof node.code === "string" && node.code) {
+      const items = itemsFor(node);
+      if (items.length) remember(byCode, node.code, { items, username, at: Date.now() });
+    }
+
+    if (node.pk != null) {
+      const item = itemFor(node);
+      if (item) remember(byPk, String(node.pk), { item, username, at: Date.now() });
+    }
+  }
+
+  function rememberBurst(node) {
+    const items = [];
+    for (const entry of node.items) {
+      const item = itemFor(entry);
+      if (item) items.push(item);
+    }
     if (!items.length) return;
-    const owner = username || media?.user?.username || null;
-    if (store.has(code)) store.delete(code);
-    store.set(code, { items, username: owner, at: Date.now() });
-    while (store.size > MAX_ENTRIES) store.delete(store.keys().next().value);
+
+    const username = node.user && typeof node.user.username === "string" ? node.user.username : null;
+    const stored = { items, username, at: Date.now() };
+    const id = typeof node.id === "string" ? node.id : "";
+
+    if (username) remember(byBurst, `user:${username}`, stored);
+    if (id) {
+      remember(byBurst, `id:${id}`, stored);
+      // URLs drop the "highlight:" prefix: /stories/highlights/1791234/
+      const bare = id.replace(/^highlight:/, "");
+      if (bare !== id) remember(byBurst, `id:${bare}`, stored);
+      else remember(byBurst, `id:highlight:${id}`, stored);
+    }
   }
 
   function walk(node, depth) {
-    if (!node || typeof node !== "object" || depth > 24) return;
+    if (!node || typeof node !== "object" || depth > 26) return;
 
     if (Array.isArray(node)) {
       for (const entry of node) walk(entry, depth + 1);
       return;
     }
 
-    if (
-      typeof node.code === "string" &&
-      (node.image_versions2 || node.video_versions || node.carousel_media)
-    ) {
-      remember(node.code, node);
-    }
+    if (isMediaNode(node)) rememberMedia(node);
+    if (isBurst(node)) rememberBurst(node);
 
     for (const key in node) {
       const value = node[key];
@@ -98,11 +204,15 @@
     window.fetch = function patchedFetch(...args) {
       const request = args[0];
       const url =
-        typeof request === "string" ? request : request && typeof request.url === "string" ? request.url : "";
+        typeof request === "string"
+          ? request
+          : request && typeof request.url === "string"
+            ? request.url
+            : "";
 
       return nativeFetch.apply(this, args).then((response) => {
         try {
-          if (/instagram\.com\/(api|graphql)|\/graphql\/query/i.test(url)) {
+          if (/instagram\.com\/(api|graphql)|graphql\/query|\/api\/v1\//i.test(url)) {
             response
               .clone()
               .json()
@@ -134,20 +244,96 @@
     return nativeOpen.call(this, method, url, ...rest);
   };
 
+  // --- inline page data -----------------------------------------------------
+  // Highlights and profile tabs often ship their first payload inside a script
+  // tag, which never passes through fetch or XHR.
+  function scanInline() {
+    const scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
+    for (const script of scripts) {
+      const text = script.textContent;
+      if (!text || text.length < 64) continue;
+      if (text.indexOf("image_versions2") === -1 && text.indexOf("video_versions") === -1) continue;
+      ingestText(text);
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => setTimeout(scanInline, 0), { once: true });
+  } else {
+    setTimeout(scanInline, 0);
+  }
+
+  // --- story item matching --------------------------------------------------
+  // A highlight page keeps one URL while the viewer moves through its items, so
+  // the displayed media is identified by aspect ratio. Story items in a burst
+  // almost always differ, and the decoded size is exact.
+  function closestByAspect(items, aspect) {
+    if (!aspect || !isFinite(aspect) || aspect <= 0) return null;
+    let best = null;
+    let bestDelta = Infinity;
+    for (const item of items) {
+      if (!item.width || !item.height) continue;
+      const delta = Math.abs(item.width / item.height - aspect);
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = item;
+      }
+    }
+    // 8% tolerance: reels are letterboxed, so exact matches are not guaranteed.
+    return best && bestDelta <= 0.08 * Math.max(1, aspect) ? best : null;
+  }
+
+  function burstFor(message) {
+    const candidates = [];
+    if (message.storyId) {
+      const id = String(message.storyId).replace(/\/+$/, "");
+      candidates.push(`id:${id}`, `id:highlight:${id}`, `id:${id.replace(/^highlight:/, "")}`);
+    }
+    if (message.storyUser) candidates.push(`user:${message.storyUser}`);
+
+    for (const key of candidates) {
+      const entry = byBurst.get(key);
+      if (entry) return entry;
+    }
+    return null;
+  }
+
+  function resolve(message) {
+    if (message.code) {
+      const entry = byCode.get(message.code);
+      if (entry) return { items: entry.items, username: entry.username };
+    }
+
+    if (message.pk) {
+      const entry = byPk.get(String(message.pk));
+      if (entry) return { items: [entry.item], username: entry.username };
+    }
+
+    const burst = burstFor(message);
+    if (burst) {
+      const picked =
+        closestByAspect(burst.items, message.aspect) ||
+        (burst.items.length === 1 ? burst.items[0] : null);
+      if (picked) return { items: [picked], username: burst.username };
+      return null;
+    }
+
+    return null;
+  }
+
   // --- isolated content script bridge --------------------------------------
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     const data = event.data;
-    if (!data || data.__instaSaver !== "get" || typeof data.shortcode !== "string") return;
+    if (!data || data.__instaSaver !== "get") return;
 
-    const entry = store.get(data.shortcode);
-    window.postMessage(
-      {
-        __instaSaver: "media",
-        id: data.id,
-        entry: entry ? { items: entry.items, username: entry.username } : null
-      },
-      "*"
-    );
+    let entry = null;
+    try {
+      entry = resolve(data);
+    } catch {
+      entry = null;
+    }
+
+    window.postMessage({ __instaSaver: "media", id: data.id, entry }, "*");
   });
 })();
