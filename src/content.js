@@ -380,10 +380,101 @@
     liveButtons.add(button);
   }
 
+  // --- action bar injection (on the side next to comments / likes / save) ---
+  function attachToActionBar(anchorSvg) {
+    if (!anchorSvg) return;
+    const btn = anchorSvg.closest("button, [role='button']");
+    if (!btn || btn.closest(".ig-saver-action-btn")) return;
+
+    const container = btn.parentElement;
+    if (!container) return;
+
+    const bar =
+      btn.closest("section, div[style*='flex'], div[class*='action'], div[role='presentation']") ||
+      container.parentElement ||
+      container;
+    if (bar.querySelector(".ig-saver-action-btn") || container.querySelector(".ig-saver-action-btn")) {
+      return;
+    }
+
+    const scope =
+      btn.closest("article, [role='dialog'], [role='presentation'], [tabindex='-1']") ||
+      btn.closest("div[style*='height']") ||
+      document;
+
+    const findMedia = () => {
+      const v = scope.querySelector("video");
+      if (v) return v;
+      const img = scope.querySelector('img[srcset], img[src*="cdninstagram"], img[src*="fbcdn"]');
+      if (img) return img;
+      return document.querySelector("video") || document.querySelector("img[src*='cdninstagram']");
+    };
+
+    const isReels =
+      location.pathname.includes("/reel") ||
+      !!btn.closest("[style*='column'], div[class*='action']");
+
+    const wrapper = document.createElement("div");
+    wrapper.className = isReels ? "ig-saver-action-wrap" : "ig-saver-action-container";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ig-saver-action-btn";
+    button.dataset.state = "idle";
+    button.title = "Download";
+    button.setAttribute("aria-label", "Download");
+    button.innerHTML = ICONS.download;
+
+    if (isReels) {
+      const label = document.createElement("span");
+      label.className = "ig-saver-action-label";
+      label.textContent = "Save";
+      wrapper.appendChild(button);
+      wrapper.appendChild(label);
+    } else {
+      wrapper.appendChild(button);
+    }
+
+    const stop = (event) => event.stopPropagation();
+    for (const type of ["pointerdown", "mousedown", "touchstart", "dblclick", "auxclick"]) {
+      button.addEventListener(type, stop);
+    }
+
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const media = findMedia();
+      if (media) {
+        onDownload(media, button);
+      } else {
+        toast("No media found — open the post and try again");
+      }
+    });
+
+    if (container.parentElement === bar) {
+      container.insertAdjacentElement("afterend", wrapper);
+    } else {
+      btn.insertAdjacentElement("afterend", wrapper);
+    }
+
+    liveButtons.add(button);
+  }
+
+  function scanActionBars() {
+    const anchors = document.querySelectorAll(
+      'svg[aria-label="Comment"], svg[aria-label="Save"], svg[aria-label="Share Post"], svg[aria-label="Share"]'
+    );
+    for (const anchor of anchors) {
+      attachToActionBar(anchor);
+    }
+  }
+
   function scan() {
     for (const button of liveButtons) {
       if (!button.isConnected) liveButtons.delete(button);
     }
+
+    scanActionBars();
 
     for (const node of document.querySelectorAll("img, video")) {
       const existing = buttons.get(node);

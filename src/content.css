@@ -5,23 +5,23 @@
   position: absolute;
   top: 12px;
   right: 12px;
-  z-index: 20;
+  z-index: 1000;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   border-radius: 999px;
   color: #fff;
-  background: rgba(14, 14, 16, 0.56);
+  background: rgba(20, 20, 24, 0.85);
   -webkit-backdrop-filter: blur(14px) saturate(140%);
   backdrop-filter: blur(14px) saturate(140%);
   box-shadow:
-    0 2px 8px rgba(0, 0, 0, 0.3),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+    0 4px 14px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.25);
   box-sizing: border-box;
   cursor: pointer;
-  opacity: 0.92;
+  opacity: 0.95;
   transform: scale(1);
   transition:
     transform 140ms cubic-bezier(0.23, 1, 0.32, 1),
@@ -32,9 +32,92 @@
 @media (hover: hover) and (pointer: fine) {
   .ig-saver-btn:hover {
     opacity: 1;
-    background: rgba(14, 14, 16, 0.74);
-    transform: scale(1.06);
+    background: #0095f6;
+    box-shadow: 0 4px 16px rgba(0, 149, 246, 0.5);
+    transform: scale(1.08);
   }
+}
+
+/* In DMs / Inbox, make button prominently visible in vibrant blue */
+[role="row"] .ig-saver-btn,
+[role="listitem"] .ig-saver-btn {
+  top: 8px !important;
+  right: 8px !important;
+  z-index: 1000 !important;
+  background: rgba(0, 149, 246, 0.95) !important;
+  color: #fff !important;
+  box-shadow: 0 4px 14px rgba(0, 149, 246, 0.45) !important;
+  width: 36px !important;
+  height: 36px !important;
+}
+
+/* --- Action bar button (on the side next to comments / likes / save) --- */
+.ig-saver-action-container,
+.ig-saver-action-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+}
+
+.ig-saver-action-wrap {
+  flex-direction: column;
+  margin: 6px 0;
+}
+
+.ig-saver-action-btn {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 8px;
+  box-sizing: border-box;
+  color: inherit;
+  transition: transform 120ms ease, opacity 120ms ease, color 120ms ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ig-saver-action-btn:hover {
+  opacity: 0.72;
+  transform: scale(1.1);
+}
+
+.ig-saver-action-btn:active {
+  transform: scale(0.92);
+}
+
+.ig-saver-action-btn svg {
+  display: block;
+  width: 24px;
+  height: 24px;
+  pointer-events: none;
+}
+
+.ig-saver-action-btn[data-state="busy"] .ig-saver-spin {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+}
+
+.ig-saver-action-btn[data-state="done"] {
+  color: #1f9d55 !important;
+}
+
+.ig-saver-action-btn[data-state="error"] {
+  color: #ed4956 !important;
+}
+
+.ig-saver-action-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: inherit;
+  margin-top: 3px;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  opacity: 0.9;
+  text-align: center;
 }
 
 /* Reel player and story viewer: clear their own top-right controls. */
