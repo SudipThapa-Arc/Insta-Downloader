@@ -68,8 +68,39 @@
 }
 
 article .ig-saver-action-btn,
-[role="dialog"] .ig-saver-action-btn {
+[role="dialog"] .ig-saver-action-btn,
+main .ig-saver-action-btn,
+[role="main"] .ig-saver-action-btn {
   margin-right: 6px;
+}
+
+/* Story bottom action bar (next to reply and react) */
+.ig-saver-story-btn {
+  color: #fff !important;
+  margin-left: 6px;
+  margin-right: 4px;
+  z-index: 1000;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+}
+
+.ig-saver-story-btn:hover {
+  opacity: 0.75;
+  transform: scale(1.08);
+}
+
+.ig-saver-story-btn:active {
+  transform: scale(0.92);
+}
+
+.ig-saver-story-btn svg {
+  display: block;
+  width: 24px;
+  height: 24px;
+  pointer-events: none;
 }
 
 .ig-saver-action-btn:hover {

@@ -162,17 +162,15 @@
 
   // --- media detection ------------------------------------------------------
   function isCandidate(node) {
+    if (location.pathname.startsWith("/stories")) return false;
     if (node.closest("header, nav, .ig-saver-btn")) return false;
 
-    // Skip IMG if it is just a poster for an adjacent or sibling VIDEO
-    if (node.tagName === "IMG") {
-      const container = node.parentElement;
-      if (
-        container &&
-        (container.querySelector("video") || container.parentElement?.querySelector("video"))
-      ) {
-        return false;
-      }
+    // Do NOT inject floating overlay buttons if media belongs to a post with an action bar
+    // (Feed posts, single /p/ or /reel/ pages, profile modal dialogs).
+    // The action bar button next to Bookmark handles these cleanly!
+    // Floating overlay buttons are strictly reserved for Direct Messages (inbox previews).
+    if (!node.closest('[role="row"], [role="listitem"]')) {
+      return false;
     }
 
     const rect = node.getBoundingClientRect();
@@ -284,12 +282,42 @@
       if (entry && entry.username) username = entry.username;
 
       // One item from the page data is always the full-quality source.
-      // A carousel: keep the slide that was actually clicked, from the DOM.
+      // Priority:
+      //   1. Interceptor entry video items (the real CDN mp4 URL)
+      //   2. Interceptor entry image items (only if no video found)
+      //   3. DOM video src (only if not blob: — direct progressive mp4)
+      //   4. All entry items as fallback
       let items = null;
       if (entry && entry.items && entry.items.length) {
-        items = story || entry.items.length === 1 ? entry.items : null;
+        // For single-media posts always use interceptor data.
+        // For carousels (>1 item and not story) try to match what the user is looking at.
+        if (story) {
+          items = entry.items;
+        } else {
+          // Always prefer the video items from the entry, regardless of carousel size
+          const videoItems = entry.items.filter((i) => i.type === "video");
+          const imageItems = entry.items.filter((i) => i.type === "image");
+
+          if (videoItems.length) {
+            // If the DOM media is a VIDEO or the entry has only 1 video item, download it
+            if (media.tagName === "VIDEO" || entry.items.length === 1 || videoItems.length === 1) {
+              items = videoItems;
+            } else {
+              // Carousel with multiple videos — use all video items
+              items = videoItems;
+            }
+          } else if (entry.items.length === 1) {
+            // Single image post
+            items = imageItems.length ? imageItems : entry.items;
+          } else {
+            // Multi-image carousel — user clicked a specific slide
+            items = null; // fall through to domItems for the visible slide
+          }
+        }
       }
+      // Fall back to DOM media only if interceptor had no video data
       if (!items) items = domItems(media);
+      // Last resort: all entry items (image carousel)
       if (!items && entry && entry.items) items = entry.items;
 
       if (!items || !items.length) {
@@ -335,6 +363,7 @@
 
   // --- button injection -----------------------------------------------------
   function attach(media) {
+    if (location.pathname.startsWith("/stories")) return;
     const parent = media.parentElement;
     if (!parent) return;
 
@@ -381,25 +410,68 @@
   }
 
   // --- action bar injection (feed posts & reels) -----------------------------
-  function findMediaForPost(post) {
-    const video = post.querySelector("video");
-    if (video) return video;
 
+  /**
+   * Find the best media element for a post at CLICK TIME.
+   * Prefers visible <video> (even blob:), falls back to best <img>.
+   * Never returns elements inside header/nav/buttons.
+   */
+  function findBestMediaNow(post) {
+    const isPage =
+      !post ||
+      post === document ||
+      post.tagName === "SECTION" ||
+      post === document.documentElement ||
+      post === document.body;
+
+    // Priority 1: any visible video in the post scope / page
+    const videoPool = isPage
+      ? Array.from(document.querySelectorAll("video"))
+      : Array.from((post || document).querySelectorAll("video")).concat(
+          Array.from(document.querySelectorAll("video"))
+        );
+    for (const v of videoPool) {
+      if (v.closest("header, nav")) continue;
+      const rect = v.getBoundingClientRect();
+      if (rect.width >= 100 && rect.height >= 100) return v;
+    }
+    // Any video at all (off-screen is fine for SPA pre-renders)
+    const anyVideo = document.querySelector("video:not(header video):not(nav video)");
+    if (anyVideo) return anyVideo;
+
+    // Priority 2: largest CDN image in scope
+    const imgPool = isPage ? document : post || document;
     const imgs = Array.from(
-      post.querySelectorAll('img[srcset], img[src*="cdninstagram"], img[src*="fbcdn"]')
+      imgPool.querySelectorAll('img[srcset], img[src*="cdninstagram"], img[src*="fbcdn"]')
     );
-    let best = null;
+    let bestImg = null;
     let maxArea = 0;
     for (const img of imgs) {
-      if (img.closest("header, nav, .ig-saver-btn")) continue;
+      if (img.closest("header, nav, button, [role='button'], .ig-saver-btn")) continue;
       const rect = img.getBoundingClientRect();
       const area = rect.width * rect.height;
       if (area > maxArea && rect.width >= MIN_SIZE && rect.height >= MIN_SIZE) {
         maxArea = area;
-        best = img;
+        bestImg = img;
       }
     }
-    return best || post.querySelector("img") || null;
+    if (bestImg) return bestImg;
+
+    // Priority 3: any CDN image in document
+    const docImgs = Array.from(
+      document.querySelectorAll('img[src*="cdninstagram"], img[src*="fbcdn"]')
+    );
+    maxArea = 0;
+    for (const img of docImgs) {
+      if (img.closest("header, nav, button, [role='button'], .ig-saver-btn")) continue;
+      const rect = img.getBoundingClientRect();
+      const area = rect.width * rect.height;
+      if (area > maxArea && rect.width >= 100 && rect.height >= 100) {
+        maxArea = area;
+        bestImg = img;
+      }
+    }
+    return bestImg || null;
   }
 
   function findMediaForReel(column) {
@@ -460,23 +532,107 @@
     return null;
   }
 
-  // Feed posts and post modal dialogs: inject on the right side next to Bookmark
-  function attachFeedAction(post) {
-    if (!post || location.pathname.includes("/reel") || post.querySelector(".ig-saver-action-btn")) return;
+  // --- story bottom action bar (next to reply and react) ---------------------
+  function findMediaForStory() {
+    const videos = Array.from(document.querySelectorAll("video"));
+    for (const v of videos) {
+      const rect = v.getBoundingClientRect();
+      if (rect.width > 150 && rect.height > 200 && rect.top < window.innerHeight && rect.bottom > 0) {
+        return v;
+      }
+    }
+    const imgs = Array.from(document.querySelectorAll("img"));
+    let best = null;
+    let maxArea = 0;
+    for (const img of imgs) {
+      if (img.closest("header, nav, button, [role='button']")) continue;
+      const rect = img.getBoundingClientRect();
+      const area = rect.width * rect.height;
+      if (area > maxArea && rect.width > 150 && rect.height > 200) {
+        maxArea = area;
+        best = img;
+      }
+    }
+    return best || videos[0] || null;
+  }
 
-    // Look for the bookmark button (Save / Remove ribbon icon)
-    const bookmarkSvg = post.querySelector(
-      'svg[aria-label="Save"], svg[aria-label="Remove"], svg[aria-label="Bookmark"]'
+  function attachStoryAction() {
+    if (!location.pathname.startsWith("/stories")) return;
+    if (document.querySelector(".ig-saver-story-btn")) return;
+
+    // Search for reaction/share buttons at the bottom of the story screen
+    const candidateSvgs = document.querySelectorAll(
+      'svg[aria-label="Direct"], svg[aria-label="Share Story"], svg[aria-label="Send"], svg[aria-label="Share"], svg[aria-label="Like"], svg[aria-label="Unlike"]'
     );
-    if (bookmarkSvg && findReelsActionColumn(bookmarkSvg)) {
-      // This bookmark is inside a vertical Reels column, not a horizontal feed post
-      return;
+
+    let targetBtn = null;
+    let fallbackBtn = null;
+
+    for (const svg of candidateSvgs) {
+      const btn = svg.closest("button, [role='button']");
+      if (!btn) continue;
+      const rect = btn.getBoundingClientRect();
+      // Must be in the lower half of the viewport (story footer)
+      if (rect.top > window.innerHeight * 0.5 && rect.width > 0 && rect.height > 0) {
+        const label = svg.getAttribute("aria-label") || "";
+        if (/Direct|Share|Send/i.test(label)) {
+          targetBtn = btn;
+          break;
+        }
+        fallbackBtn = btn;
+      }
     }
 
-    const bookmarkBtn = bookmarkSvg ? bookmarkSvg.closest("button, [role='button']") : null;
+    const anchor = targetBtn || fallbackBtn;
+    if (!anchor) return;
+
+    const parent = anchor.parentElement;
+    if (!parent) return;
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ig-saver-action-btn ig-saver-story-btn";
+    button.dataset.state = "idle";
+    button.dataset.variant = "story";
+    button.title = "Download Story";
+    button.setAttribute("aria-label", "Download Story");
+    button.innerHTML = ICONS.download;
+
+    const stop = (event) => event.stopPropagation();
+    for (const type of ["pointerdown", "mousedown", "touchstart", "dblclick", "auxclick"]) {
+      button.addEventListener(type, stop);
+    }
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const media = findMediaForStory();
+      if (media) {
+        onDownload(media, button);
+      } else {
+        toast("No story media found — try again");
+      }
+    });
+
+    const comp = window.getComputedStyle(parent);
+    if (comp.display !== "flex" && comp.display !== "inline-flex") {
+      parent.style.display = "inline-flex";
+      parent.style.alignItems = "center";
+    }
+
+    // Insert directly after the anchor (Paper airplane or Heart)
+    anchor.insertAdjacentElement("afterend", button);
+    liveButtons.add(button);
+  }
+
+  // --- post horizontal action bar (feed, single post /reel/ or /p/, modals) ---
+  function attachPostAction(bookmarkBtn, post) {
+    if (!bookmarkBtn) return;
+    const parent = bookmarkBtn.parentElement;
+    if (!parent || parent.querySelector(".ig-saver-action-btn")) return;
 
     const button = createActionButton("feed", (btn) => {
-      const media = findMediaForPost(post);
+      // Re-evaluate media at click time so we always get the live video element
+      const media = findBestMediaNow(post);
       if (media) {
         onDownload(media, btn);
       } else {
@@ -484,44 +640,59 @@
       }
     });
 
-    if (bookmarkBtn) {
-      const section = post.querySelector("section");
-      const rightGroup = section ? section.querySelector(":scope > div:last-child") : null;
+    const section = bookmarkBtn.closest("section");
+    const rightGroup = section ? section.querySelector(":scope > div:last-child") : null;
 
-      if (rightGroup && rightGroup.contains(bookmarkSvg)) {
-        // Ensure right group maintains flex row alignment
-        const comp = window.getComputedStyle(rightGroup);
-        if (comp.display !== "flex" && comp.display !== "inline-flex") {
-          rightGroup.style.display = "inline-flex";
-          rightGroup.style.alignItems = "center";
-        }
-        const bookmarkItem =
-          Array.from(rightGroup.children).find((c) => c.contains(bookmarkSvg)) || bookmarkBtn;
-        bookmarkItem.insertAdjacentElement("beforebegin", button);
-        return;
+    if (rightGroup && rightGroup.contains(bookmarkBtn)) {
+      const comp = window.getComputedStyle(rightGroup);
+      if (comp.display !== "flex" && comp.display !== "inline-flex") {
+        rightGroup.style.display = "inline-flex";
+        rightGroup.style.alignItems = "center";
       }
-
-      const parent = bookmarkBtn.parentElement;
-      if (parent) {
-        const comp = window.getComputedStyle(parent);
-        if (comp.display !== "flex" && comp.display !== "inline-flex") {
-          parent.style.display = "inline-flex";
-          parent.style.alignItems = "center";
-        }
-        bookmarkBtn.insertAdjacentElement("beforebegin", button);
-        return;
-      }
+      const bookmarkItem =
+        Array.from(rightGroup.children).find((c) => c.contains(bookmarkBtn)) || bookmarkBtn;
+      bookmarkItem.insertAdjacentElement("beforebegin", button);
+      return;
     }
 
-    // Fallback: If no bookmark button found, attach to the right side of the action section
-    const section = post.querySelector("section");
-    if (section) {
-      button.style.marginLeft = "auto";
-      section.appendChild(button);
+    const comp = window.getComputedStyle(parent);
+    if (comp.display !== "flex" && comp.display !== "inline-flex") {
+      parent.style.display = "inline-flex";
+      parent.style.alignItems = "center";
+    }
+    bookmarkBtn.insertAdjacentElement("beforebegin", button);
+  }
+
+  function scanPostActionBars() {
+    if (location.pathname.startsWith("/stories")) return;
+
+    // Find all bookmark buttons on the page (works on feed, direct post /reel/, /p/, modals, etc.)
+    const bookmarkSvgs = document.querySelectorAll(
+      'svg[aria-label="Save"], svg[aria-label="Remove"], svg[aria-label="Bookmark"]'
+    );
+
+    for (const bookmarkSvg of bookmarkSvgs) {
+      // If this bookmark is inside a vertical Reels column, scanReelActionBars handles it
+      if (findReelsActionColumn(bookmarkSvg)) continue;
+
+      const bookmarkBtn = bookmarkSvg.closest("button, [role='button']") || bookmarkSvg;
+      const bar =
+        bookmarkBtn.closest("section, div[style*='flex'], div[role='presentation']") ||
+        bookmarkBtn.parentElement?.parentElement;
+
+      if (bar && bar.querySelector(".ig-saver-action-btn")) continue;
+      if (bookmarkBtn.parentElement?.querySelector(".ig-saver-action-btn")) continue;
+
+      const post =
+        bookmarkBtn.closest("article, [role='dialog'], main, [role='main']") ||
+        bar?.parentElement?.parentElement ||
+        document;
+
+      attachPostAction(bookmarkBtn, post);
     }
   }
 
-  // Reels: inject into the vertical action column on the right
+  // --- reels vertical action column -----------------------------------------
   function attachReelAction(column) {
     if (!column || column.querySelector(".ig-saver-action-wrap, .ig-saver-action-btn")) return;
 
@@ -540,7 +711,8 @@
     wrapper.className = "ig-saver-action-wrap";
 
     const button = createActionButton("reel", (btn) => {
-      const media = findMediaForReel(column);
+      // findBestMediaNow prefers visible video at click time
+      const media = findBestMediaNow(null);
       if (media) {
         onDownload(media, btn);
       } else {
@@ -566,15 +738,9 @@
     }
   }
 
-  function scanFeedActionBars() {
-    if (location.pathname.includes("/reel")) return;
-    const posts = document.querySelectorAll("article, [role='dialog']");
-    for (const post of posts) {
-      attachFeedAction(post);
-    }
-  }
-
   function scanReelActionBars() {
+    if (location.pathname.startsWith("/stories")) return;
+
     const actionSvgs = document.querySelectorAll(
       'svg[aria-label="Save"], svg[aria-label="Remove"], svg[aria-label="Bookmark"], svg[aria-label="Share Post"], svg[aria-label="Share"], svg[aria-label="Comment"]'
     );
@@ -590,7 +756,7 @@
   }
 
   function scanActionBars() {
-    scanFeedActionBars();
+    scanPostActionBars();
     scanReelActionBars();
   }
 
@@ -599,12 +765,25 @@
       if (!button.isConnected) liveButtons.delete(button);
     }
 
-    scanActionBars();
+    if (location.pathname.startsWith("/stories")) {
+      // In stories: clean up any stray top buttons and attach to bottom react/reply bar
+      document.querySelectorAll(".ig-saver-btn").forEach((btn) => btn.remove());
+      attachStoryAction();
+    } else {
+      // Clean up any stray floating buttons on posts that have action bars
+      for (const btn of document.querySelectorAll(".ig-saver-btn")) {
+        if (!btn.closest('[role="row"], [role="listitem"]')) {
+          btn.remove();
+        }
+      }
 
-    for (const node of document.querySelectorAll("img, video")) {
-      const existing = buttons.get(node);
-      if (existing && existing.isConnected) continue;
-      if (isCandidate(node)) attach(node);
+      scanActionBars();
+
+      for (const node of document.querySelectorAll("img, video")) {
+        const existing = buttons.get(node);
+        if (existing && existing.isConnected) continue;
+        if (isCandidate(node)) attach(node);
+      }
     }
   }
 
@@ -617,6 +796,35 @@
       scan();
     }, 200);
   }
+
+  // SPA navigation detection (history.pushState / history.replaceState / popstate)
+  let lastUrl = location.href;
+  function checkUrlChange() {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      scheduleScan();
+    }
+  }
+
+  const origPushState = history.pushState;
+  if (origPushState) {
+    history.pushState = function (...args) {
+      const ret = origPushState.apply(this, args);
+      checkUrlChange();
+      return ret;
+    };
+  }
+
+  const origReplaceState = history.replaceState;
+  if (origReplaceState) {
+    history.replaceState = function (...args) {
+      const ret = origReplaceState.apply(this, args);
+      checkUrlChange();
+      return ret;
+    };
+  }
+
+  window.addEventListener("popstate", checkUrlChange);
 
   new MutationObserver(scheduleScan).observe(document.documentElement, {
     childList: true,

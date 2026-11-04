@@ -394,7 +394,13 @@
 
   async function resolveWithFallback(message) {
     let entry = resolve(message);
-    if (!entry && message.code) {
+
+    // If we got an entry but it's image-only AND the page URL suggests this is a video post
+    // (reel/video shortcode), try to fetch the real data which will have video_versions.
+    const hasOnlyImages = entry && entry.items && entry.items.length > 0 &&
+      entry.items.every((i) => i.type === "image");
+
+    if ((!entry || hasOnlyImages) && message.code) {
       const urls = [
         `https://www.instagram.com/p/${encodeURIComponent(message.code)}/?__a=1&__d=dis`,
         `https://www.instagram.com/reel/${encodeURIComponent(message.code)}/?__a=1&__d=dis`
@@ -411,8 +417,15 @@
           if (res.ok) {
             const json = await res.json();
             ingest(json);
-            entry = resolve(message);
-            if (entry) break;
+            const freshEntry = resolve(message);
+            // Only replace the entry if the fresh data has video items
+            if (freshEntry) {
+              const freshHasVideo = freshEntry.items && freshEntry.items.some((i) => i.type === "video");
+              if (freshHasVideo || !entry) {
+                entry = freshEntry;
+              }
+            }
+            if (entry && entry.items && entry.items.some((i) => i.type === "video")) break;
           }
         } catch {
           /* try next */

@@ -20,7 +20,8 @@ A download button appears **directly on the side where the comments, likes, and 
 - **Reels** — a dedicated **Save/Download** button in the vertical action bar on the right side (right alongside Comment, Like, and Share).
 - **Feed / profile posts & Modals** — right in the action toolbar beneath the post, beside the Comment and Save icons.
 - **Direct Messages (Inbox)** — a vibrant blue download badge right on shared reels and video message previews.
-- **Stories & Highlights** — top-right corner of the viewer.
+- **Stories & Highlights** — right at the bottom action bar alongside the React and Reply section (no unclickable top button).
+- **Single Posts & Reels** (opened from Stories "Watch full reel", "See post", or direct links) — right in the action toolbar beside the Bookmark icon.
 
 Click once → the button spins → turns green with a toast that also reports what was saved
 (for example `Saved · 1080×1920`). Files land in
